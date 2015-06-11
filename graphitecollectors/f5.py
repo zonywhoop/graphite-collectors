@@ -95,7 +95,7 @@ def get_parser():
                            help='Logging output filename',
                            action='store', dest='logfile')
     icontrol_group = parser.add_argument_group('icontrol')
-    icontrol_group.add_argument('--f5-username', '--f5-user', 
+    icontrol_group.add_argument('--f5-username', '--f5-user',
                                 help='Username for F5 iControl authentication',
                                 dest='f5_username', required=True)
     icontrol_group.add_argument('--f5-password', '--f5-pass',
@@ -103,6 +103,11 @@ def get_parser():
                                 dest='f5_password', required=True)
     icontrol_group.add_argument('--f5-host', help="F5 host", dest="f5_host",
                                 required=True)
+    icontrol_group.add_argument('--loop', help="Gather stats every X seconds in a loop",
+                                dest="loopInterval", type=int, default=0)
+    icontrol_group.add_argument('--active_only', help="Only gather in depth stats for " +
+                                "active cluster node", action="store_true", dest="active_only",
+                                default=False)
     carbon_group = parser.add_argument_group('carbon')
     carbon_group.add_argument('--carbon-host', help="Carbon host",
                               dest="carbon_host")
@@ -202,6 +207,13 @@ def convert_to_epoch(year, month, day, hour, minute, second, tz):
     epoch = td.seconds + td.days * 24 * 3600
     logging.debug("epoch = %s" % epoch)
     return(epoch)
+
+
+def get_cluster_state(ltm_host, user, password):
+    logging.info("Connecting to BIG-IP to check cluster status")
+    b = bigsuds.BIGIP(hostname=ltm_host, username=user, password=password)
+    cstate = b.System.Failover.get_failover_state()
+    return(cstate)
 
 
 def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
@@ -753,60 +765,82 @@ def main():
         prefix = "bigip.%s" % scrubbed_f5_host
         logging.debug("prefix = %s" % prefix)
 
-    start_timestamp = timestamp_local()
-    logging.debug("start_timestamp = %s" % start_timestamp)
+    running = True
+    while running:
+        start_timestamp = timestamp_local()
+        logging.debug("start_timestamp = %s" % start_timestamp)
+        if args.active_only:
+            cstate = get_cluster_state(args.f5_host, args.f5_username, args.f5_password)
 
-    metric_list = gather_f5_metrics(args.f5_host, args.f5_username,
-                                    args.f5_password, prefix, remote_ts,
-                                    args.interfaces, args.no_ip, 
-                                    args.no_ipv6, args.no_icmp,
-                                    args.no_icmpv6, args.no_tcp, args.no_tmm,
-                                    args.no_client_ssl, args.no_interface,
-                                    args.no_trunk, args.no_cpu, args.no_host,
-                                    args.no_snat_pool,
-                                    args.no_snat_translation,
-                                    args.no_virtual_server, args.no_pool)
+        if args.active_only and cstate != 'FAILOVER_STATE_ACTIVE':
+            metric_list = gather_f5_metrics(args.f5_host, args.f5_username,
+                                            args.f5_password, prefix, remote_ts,
+                                            args.interfaces, args.no_ip,
+                                            args.no_ipv6, args.no_icmp,
+                                            args.no_icmpv6, args.no_tcp, True,
+                                            True, args.no_interface,
+                                            True, args.no_cpu, args.no_host,
+                                            True,True,True,True)
+        else:
+            metric_list = gather_f5_metrics(args.f5_host, args.f5_username,
+                                            args.f5_password, prefix, remote_ts,
+                                            args.interfaces, args.no_ip,
+                                            args.no_ipv6, args.no_icmp,
+                                            args.no_icmpv6, args.no_tcp, args.no_tmm,
+                                            args.no_client_ssl, args.no_interface,
+                                            args.no_trunk, args.no_cpu, args.no_host,
+                                            args.no_snat_pool,
+                                            args.no_snat_translation,
+                                            args.no_virtual_server, args.no_pool)
 
-    if not args.skip_upload and args.carbon_host:
-        upload_attempts = 0
-        upload_success = False
-        max_attempts = args.carbon_retries + 1
-        while not upload_success and (upload_attempts < max_attempts):
-            upload_attempts += 1
-            logging.info("Uploading metrics (try #%d/%d)..." %
-                         (upload_attempts, max_attempts))
-            try:
-                send_metrics(args.carbon_host, args.carbon_port, metric_list,
-                             args.chunk_size)
-            except Exception, detail:
-                logging.error("Unable to upload metrics.")
-                logging.debug(Exception)
-                logging.debug(detail)
-                upload_success = False
-                if upload_attempts < max_attempts:  # don't sleep on last run
-                    logging.info("Sleeping %d seconds before retry..." %
-                                 args.carbon_interval)
-                    time.sleep(args.carbon_interval)
+        if not args.skip_upload and args.carbon_host:
+            upload_attempts = 0
+            upload_success = False
+            max_attempts = args.carbon_retries + 1
+            while not upload_success and (upload_attempts < max_attempts):
+                upload_attempts += 1
+                logging.info("Uploading metrics (try #%d/%d)..." %
+                             (upload_attempts, max_attempts))
+                try:
+                    send_metrics(args.carbon_host, args.carbon_port, metric_list,
+                                 args.chunk_size)
+                except Exception, detail:
+                    logging.error("Unable to upload metrics.")
+                    logging.debug(Exception)
+                    logging.debug(detail)
+                    upload_success = False
+                    if upload_attempts < max_attempts:  # don't sleep on last run
+                        logging.info("Sleeping %d seconds before retry..." %
+                                     args.carbon_interval)
+                        time.sleep(args.carbon_interval)
+                else:
+                    upload_success = True
+            if not upload_success:
+                logging.error("Unable to upload metrics after %d attempts." %
+                              upload_attempts)
+                logging.info("Saving collected data to local disk for later " +
+                             "replay...")
+                date_str = datetime.now().strftime("%Y%m%dT%H%M%S")
+                logging.debug("date_str = %s" % date_str)
+                write_json_metrics(metric_list, "%s_%s_fail.json" %
+                                   (prefix, date_str))
+        else:
+            logging.info("Dry-run or no carbon host provided -- skipping " +
+                         "upload step.")
+
+        finish_timestamp = timestamp_local()
+        logging.debug("finish_timestamp = %s" % finish_timestamp)
+        runtime = finish_timestamp - start_timestamp
+        logging.info("Elapsed time in seconds is %d." % runtime)
+        if args.loopInterval > 0:
+            sleepDuration = args.loopInterval - runtime
+            if sleepDuration > 0:
+                logging.info("Sleeping for %d seconds" % sleepDuration)
+                time.sleep(sleepDuration)
             else:
-                upload_success = True
-        if not upload_success:
-            logging.error("Unable to upload metrics after %d attempts." %
-                          upload_attempts)
-            logging.info("Saving collected data to local disk for later " +
-                         "replay...")
-            date_str = datetime.now().strftime("%Y%m%dT%H%M%S")
-            logging.debug("date_str = %s" % date_str)
-            write_json_metrics(metric_list, "%s_%s_fail.json" %
-                               (prefix, date_str))
-    else:
-        logging.info("Dry-run or no carbon host provided -- skipping " +
-                     "upload step.")
-
-    finish_timestamp = timestamp_local()
-    logging.debug("finish_timestamp = %s" % finish_timestamp)
-    runtime = finish_timestamp - start_timestamp
-    logging.info("Elapsed time in seconds is %d." % runtime)
-
+                logging.info("Sleep < 0 for loop of %d seconds - Not Sleeping", % args.loopInterval)
+        else:
+            running = False
 
 if __name__ == '__main__':
     main()
@@ -817,4 +851,3 @@ if __name__ == '__main__':
 # - detect connection failures, ie. unable to connect to server
 # - put each metric collection in a try expect and return partial
 # - reload capabilities should be moved into separate utility
-
