@@ -838,7 +838,7 @@ def main():
                 logging.info("Sleeping for %d seconds" % sleepDuration)
                 time.sleep(sleepDuration)
             else:
-                logging.info("Sleep < 0 for loop of %d seconds - Not Sleeping", % args.loopInterval)
+                logging.info("Sleep < 0 for loop of %d seconds - Not Sleeping" % args.loopInterval)
         else:
             running = False
 
