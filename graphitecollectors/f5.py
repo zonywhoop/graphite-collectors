@@ -13,7 +13,7 @@ from carbonita import timestamp_local, send_metrics
 from datetime import tzinfo, timedelta, datetime
 from pprint import pformat
 
-__VERSION__ = "1.5"
+__VERSION__ = "1.5.1"
 
 # list of pool statistics to monitor
 
@@ -25,6 +25,21 @@ POOL_STATISTICS = ['current_sessions',
                    'server_side_packets_out',
                    'server_side_total_connections',
                    'total_requests']
+
+# list of pool_member statistics to monitor
+POOL_MEMBER_STATISTICS = [ 'server_side_bytes_in',
+                	'server_side_bytes_out',
+                	'server_side_packets_in',
+                	'server_side_packets_out',
+                	'server_side_current_connections',
+                	'server_side_maximum_connections',
+                	'total_requests',
+                	'current_sessions'
+                	'connqueue_connections',
+                	'connqueue_age_oldest_entry',
+                	'connqueue_age_moving_avg',
+                	'connqueue_age_exponential_decay_max',
+                	'connqueue_serviced']
 
 # list of virtual server statistics to monitor
 # syn cookie statistics for virtual servers available
@@ -73,7 +88,8 @@ CLIENT_SSL_STATISTICS = ['ssl_five_min_avg_tot_conns',
 
 # Host
 
-HOST_STATISTICS = ['memory_total_bytes',
+HOST_STATISTICS = []
+HOST_MEMORY_STATISTICS = ['memory_total_bytes',
                    'memory_used_bytes']
 
 def get_parser():
@@ -108,6 +124,8 @@ def get_parser():
     icontrol_group.add_argument('--active_only', help="Only gather in depth stats for " +
                                 "active cluster node", action="store_true", dest="active_only",
                                 default=False)
+    icontrol_group.add_argument('--no-ssl-verify', help="Do not validate SSL Cert",
+                                dest="sslverify", default=True, action="store_false")
     carbon_group = parser.add_argument_group('carbon')
     carbon_group.add_argument('--carbon-host', help="Carbon host",
                               dest="carbon_host")
@@ -165,6 +183,8 @@ def get_parser():
     metric_group.add_argument('--no-virtual-server', action="store_true",
                               dest="no_virtual_server")
     metric_group.add_argument('--no-pool', action="store_true", dest="no_pool")
+    metric_group.add_argument('--no-pool-members', action="store_true",
+                              dest="no_pool_members")
     return parser
 
 
@@ -215,12 +235,32 @@ def get_cluster_state(ltm_host, user, password):
     cstate = b.System.Failover.get_failover_state()
     return(cstate)
 
+# Itterates a list of F5 statistics [f5Input] and compares that with a stats list [statsList] to see
+# what should be stored.  If statList is null then all stats are saved.
+# It then creates a metric entry using statPath for the pre-path value and inTime for the timestamp
+def itterate_statistics(f5Input, statPath, inTime, statsList = None):
+    metrics = []
+    for y in f5Input:
+        stat_name = y['type'].split("STATISTIC_")[-1].lower()
+        if statsList is None or stat_name in statsList:
+            high = y['value']['high']
+            low = y['value']['low']
+            stat_val = convert_to_64_bit(high, low)
+            stat_path = "%s.%s" % (statPath, stat_name)
+            metric = (stat_path, (inTime, stat_val))
+            logging.debug("is_metric = %s" % str(metric))
+            metrics.append(metric)
+    return metrics
+
+# Makes sure the path is correct for Graphite
+def cleanStatPath(inPath):
+    return inPath.replace('/','.').replace('..','.')
 
 def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
                       interface_limit, no_ip, no_ipv6, no_icmp,
                       no_icmpv6, no_tcp, no_tmm, no_client_ssl,
                       no_interface, no_trunk, no_cpu, no_host, no_snat_pool,
-                      no_snat_translation, no_virtual_server, no_pool):
+                      no_snat_translation, no_virtual_server, no_pool, no_pool_members):
     """ Connects to an F5 via iControl and pulls statistics.
     """
     metric_list = []
@@ -258,15 +298,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.protocol.ip.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = cleanStatPath("%s.protocol.ip" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping IP...")
 
@@ -286,15 +320,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.protocol.ipv6.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = cleanStatPath("%s.protocol.ipv6" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping IPv6...")
 
@@ -314,15 +342,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.protocol.icmp.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = cleanStatPath("%s.protocol.icmp" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping ICMP...")
 
@@ -342,15 +364,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.protocol.icmpv6.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = cleanStatPath("%s.protocol.icmpv6" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping ICMPv6...")
 
@@ -370,15 +386,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.protocol.tcp.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = "%s.protocol.tcp" % (prefix)
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping TCP...")
 
@@ -398,15 +408,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            high = y['value']['high']
-            low = y['value']['low']
-            stat_val = convert_to_64_bit(high, low)
-            stat_path = "%s.tmm.global.%s" % (prefix, stat_name)
-            metric = (stat_path, (now, stat_val))
-            logging.debug("metric = %s" % str(metric))
-            metric_list.append(metric)
+        metric_path = cleanStatPath("%s.tmm.global" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping TMM...")
 
@@ -426,16 +430,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         else:
             now = timestamp_local()
             logging.debug("Local timestamp is %s." % now)
-        for y in statistics:
-            stat_name = y['type'].split("STATISTIC_")[-1].lower()
-            if stat_name in CLIENT_SSL_STATISTICS:
-                high = y['value']['high']
-                low = y['value']['low']
-                stat_val = convert_to_64_bit(high, low)
-                stat_path = "%s.client_ssl.%s" % (prefix, stat_name)
-                metric = (stat_path, (now, stat_val))
-                logging.debug("metric = %s" % str(metric))
-                metric_list.append(metric)
+        metric_path = cleanStatPath("%s.client_ssl" % (prefix))
+        metrics = itterate_statistics(statistics, metric_path, now, CLIENT_SSL_STATISTICS)
+        metric_list.extend(metrics)
     else:
         logging.debug("Skipping client SSL...")
 
@@ -465,15 +462,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
                 logging.debug("Local timestamp is %s." % now)
             for x in statistics:
                 int_name = x['interface_name'].replace('.', '-')
-                for y in x['statistics']:
-                    stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    stat_path = "%s.interface.%s.%s" % (prefix, int_name, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+                metric_path = cleanStatPath("%s.interface.%s" % (prefix, int_name))
+                metrics = itterate_statistics(x['statistics'], metric_path, now)
+                metric_list.extend(metrics)
     else:
         logging.debug("Skipping interfaces...")
 
@@ -499,15 +490,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
                 logging.debug("Local timestamp is %s." % now)
             for x in statistics:
                 trunk_name = x['trunk_name'].replace('.', '-')
-                for y in x['statistics']:
-                    stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    stat_path = "%s.trunk.%s.%s" % (prefix, trunk_name, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+                metric_path = cleanStatPath("%s.trunk.%s" % (prefix, trunk_name))
+                metrics = itterate_statistics(x['statistics'], metric_path, now)
+                metric_list.extend(metrics)
     else:
         logging.debug("Skipping trunks...")
 
@@ -530,15 +515,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
         for x in statistics:
             host_id = x['host_id'].replace('.', '-')
             for cpu_num, cpu_stat in enumerate(x['statistics']):
-                for y in cpu_stat:
-                    stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    stat_path = "%s.cpu.%s.cpu%s.%s" % (prefix, host_id, cpu_num, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+                metric_path = cleanStatPath("%s.cpu.%s.cpu%s" % (prefix, host_id, cpu_num))
+                metrics = itterate_statistics(cpu_stat, metric_path, now)
+                metric_list.extend(metrics)
     else:
         logging.debug("Skipping CPU...")
 
@@ -560,21 +539,14 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.debug("Local timestamp is %s." % now)
         for x in statistics:
             host_id = x['host_id'].replace('.', '-')
-            for y in x['statistics']:
-                stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                if stat_name in HOST_STATISTICS:
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    if stat_name.startswith("memory_"):
-                        # throw memory stats into dedicated memory section
-                        stat_path = "%s.memory.%s.%s" % (prefix, host_id, stat_name)
-                    else:
-                        # catch-all
-                        stat_path = "%s.system.host.%s.%s" % (prefix, host_id, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+            if len(HOST_MEMORY_STATISTICS) > 0:
+                metric_path = cleanStatPath("%s.memory.%s" % (prefix,host_id))
+                metrics = itterate_statistics(x['statistics'], metric_path, now, HOST_MEMORY_STATISTICS)
+                metric_list.extend(metrics)
+            if len(HOST_STATISTICS) > 0:
+                metric_path = cleanStatPath("%s.system.host.%s" % (prefix,host_id))
+                metrics = itterate_statistics(x['statistics'], metric_path, now, HOST_STATISTICS)
+                metric_list.extend(metrics)
     else:
         logging.debug("Skipping host statistics...")
 
@@ -596,15 +568,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.debug("Local timestamp is %s." % now)
         for x in statistics:
             snat_pool = x['snat_pool'].replace(".", '-')
-            for y in x['statistics']:
-                stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                high = y['value']['high']
-                low = y['value']['low']
-                stat_val = convert_to_64_bit(high, low)
-                stat_path = "%s.snat_pool.%s.%s" % (prefix, snat_pool, stat_name)
-                metric = (stat_path, (now, stat_val))
-                logging.debug("metric = %s" % str(metric))
-                metric_list.append(metric)
+            metric_path = cleanStatPath("%s.snat_pool.%s" % (prefix, snat_pool))
+            metrics = itterate_statistics(x['statistics'], metric_path, now)
+            metric_list.extend(metrics)
     else:
         logging.debug("Skipping SNAT pools...")
 
@@ -626,15 +592,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.debug("Local timestamp is %s." % now)
         for x in statistics:
             trans_addr = x['translation_address'].replace(".", '-')
-            for y in x['statistics']:
-                stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                high = y['value']['high']
-                low = y['value']['low']
-                stat_val = convert_to_64_bit(high, low)
-                stat_path = "%s.snat_translation.%s.%s" % (prefix, trans_addr, stat_name)
-                metric = (stat_path, (now, stat_val))
-                logging.debug("metric = %s" % str(metric))
-                metric_list.append(metric)
+            metric_path = cleanStatPath("%s.snat_translation.%s" % (prefix, trans_addr))
+            metrics = itterate_statistics(x['statistics'], metric_path, now)
+            metric_list.extend(metrics)
     else:
         logging.debug("Skipping SNAT translations...")
 
@@ -656,16 +616,9 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.debug("Local timestamp is %s." % now)
         for x in statistics:
             vs_name = x['virtual_server']['name'].replace('.', '-')
-            for y in x['statistics']:
-                stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                if stat_name in VS_STATISTICS:
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    stat_path = "%s.vs.%s.%s" % (prefix, vs_name, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+            metric_path = cleanStatPath("%s.vs.%s" % (prefix, vs_name))
+            metrics = itterate_statistics(x['statistics'], metric_path, now, VS_STATISTICS)
+            metric_list.extend(metrics)
     else:
         logging.debug("Skipping virtual servers...")
 
@@ -687,16 +640,10 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.debug("Local timestamp is %s." % now)
         for x in statistics:
             pool_name = x['pool_name'].replace('.', '-')
-            for y in x['statistics']:
-                stat_name = y['type'].split("STATISTIC_")[-1].lower()
-                if stat_name in POOL_STATISTICS:
-                    high = y['value']['high']
-                    low = y['value']['low']
-                    stat_val = convert_to_64_bit(high, low)
-                    stat_path = "%s.pool.%s.%s" % (prefix, pool_name, stat_name)
-                    metric = (stat_path, (now, stat_val))
-                    logging.debug("metric = %s" % str(metric))
-                    metric_list.append(metric)
+            metric_path = cleanStatPath("%s.pool.%s" % (prefix, pool_name))
+            metrics = itterate_statistics(x['statistics'], metric_path, now, POOL_STATISTICS)
+            metric_list.extend(metrics)
+
         # Reuse previous timestamp (a.k.a. fake it!)
         logging.info("Retrieving pool list...")
         pool_list = b.LocalLB.Pool.get_list()
@@ -705,18 +652,25 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             logging.info("Retrieving active member count for all pools...")
             active_member_count = b.LocalLB.Pool.get_active_member_count(pool_names=pool_list)
             for pool_name, stat_val in zip(pool_list, active_member_count):
-                stat_path = "%s.pool.%s.active_member_count" % (prefix, pool_name)
+                stat_path = cleanStatPath("%s.pool.%s.active_member_count" % (prefix, pool_name))
                 metric = (stat_path, (now, stat_val))
                 logging.debug("metric = %s" % str(metric))
                 metric_list.append(metric)
             logging.info("Retrieving member count for all pools...")
-            pool_members = b.LocalLB.Pool.get_member_v2(pool_names=pool_list)
+            pool_members = b.LocalLB.Pool.get_all_member_statistics(pool_names=[pool_name])
             pool_member_count = [len(x) for x in pool_members]
             for pool_name, stat_val in zip(pool_list, pool_member_count):
-                stat_path = "%s.pool.%s.member_count" % (prefix, pool_name)
+                stat_path = cleanStatPath("%s.pool.%s.member_count" % (prefix, pool_name))
                 metric = (stat_path, (now, stat_val))
                 logging.debug("metric = %s" % str(metric))
                 metric_list.append(metric)
+            if not no_pool_members:
+                for memindex, members in enumerate(pool_members):
+                    for cur_member in members['statistics']:
+                        member_name = "%s-%s" % (cur_member['member']['address'].split('/')[-1].lower(), cur_member['member']['port'])
+                        metric_path = cleanStatPath("%s.pool.%s.members.%s.%s" % (prefix, pool_name, memindex, member_name))
+                        metrics = itterate_statistics(cur_member['statistics'], metric_path, now, POOL_MEMBER_STATISTICS)
+                        metric_list.extend(metrics)
         else:
             logging.info("Pool list is empty, skipping member count retrieval.")
     else:
@@ -765,6 +719,10 @@ def main():
         prefix = "bigip.%s" % scrubbed_f5_host
         logging.debug("prefix = %s" % prefix)
 
+    if args.sslverify == False:
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+
     running = True
     while running:
         start_timestamp = timestamp_local()
@@ -780,7 +738,7 @@ def main():
                                             args.no_icmpv6, args.no_tcp, True,
                                             True, args.no_interface,
                                             True, args.no_cpu, args.no_host,
-                                            True,True,True,True)
+                                            True,True,True,True, True)
         else:
             metric_list = gather_f5_metrics(args.f5_host, args.f5_username,
                                             args.f5_password, prefix, remote_ts,
@@ -791,7 +749,8 @@ def main():
                                             args.no_trunk, args.no_cpu, args.no_host,
                                             args.no_snat_pool,
                                             args.no_snat_translation,
-                                            args.no_virtual_server, args.no_pool)
+                                            args.no_virtual_server, args.no_pool,
+                                            args.no_pool_members)
 
         if not args.skip_upload and args.carbon_host:
             upload_attempts = 0
