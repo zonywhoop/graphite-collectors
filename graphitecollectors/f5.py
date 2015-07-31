@@ -667,7 +667,7 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
             if not no_pool_members:
                 for memindex, members in enumerate(pool_members):
                     for cur_member in members['statistics']:
-                        member_name = "%s-%s" % (cur_member['member']['address'].split('/')[-1].lower(), cur_member['member']['port'])
+                        member_name = "%s-%s" % (cur_member['member']['address'].split('/')[-1].lower().replace('.', '-'), cur_member['member']['port'])
                         metric_path = cleanStatPath("%s.pool.%s.members.%s.%s" % (prefix, pool_name, memindex, member_name))
                         metrics = itterate_statistics(cur_member['statistics'], metric_path, now, POOL_MEMBER_STATISTICS)
                         metric_list.extend(metrics)
