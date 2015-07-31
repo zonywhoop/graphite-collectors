@@ -657,7 +657,7 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
                 logging.debug("metric = %s" % str(metric))
                 metric_list.append(metric)
             logging.info("Retrieving member count for all pools...")
-            pool_members = b.LocalLB.Pool.get_all_member_statistics(pool_names=[pool_name])
+            pool_members = b.LocalLB.Pool.get_all_member_statistics(pool_names=[pool_list])
             pool_member_count = [len(x) for x in pool_members]
             for pool_name, stat_val in zip(pool_list, pool_member_count):
                 stat_path = cleanStatPath("%s.pool.%s.member_count" % (prefix, pool_name))
@@ -665,10 +665,10 @@ def gather_f5_metrics(ltm_host, user, password, prefix, remote_ts,
                 logging.debug("metric = %s" % str(metric))
                 metric_list.append(metric)
             if not no_pool_members:
-                for memindex, members in enumerate(pool_members):
+                for pool_name, members in zip(pool_list, pool_members):
                     for cur_member in members['statistics']:
                         member_name = "%s-%s" % (cur_member['member']['address'].split('/')[-1].lower().replace('.', '-'), cur_member['member']['port'])
-                        metric_path = cleanStatPath("%s.pool.%s.members.%s.%s" % (prefix, pool_name, memindex, member_name))
+                        metric_path = cleanStatPath("%s.pool.%s.members.%s" % (prefix, pool_name, member_name))
                         metrics = itterate_statistics(cur_member['statistics'], metric_path, now, POOL_MEMBER_STATISTICS)
                         metric_list.extend(metrics)
         else:
